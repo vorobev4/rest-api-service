@@ -1,0 +1,6 @@
+New user created: New user created!
+User edit: User {id} edit!
+User delete: User {id} delete!
+
+New task created: New task created!
+Task delete: Task {id} delete!

@@ -3,95 +3,155 @@
 namespace App\Controller;
 
 use App\Entity\User;
+use App\Repository\UserRepository;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Doctrine\Persistence\ManagerRegistry;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpKernel\Exception\TooManyRequestsHttpException;
+use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
+use Symfony\Component\RateLimiter\RateLimiterFactory;
+use Symfony\Component\Validator\Validator\ValidatorInterface;
+use Symfony\Contracts\Translation\TranslatorInterface;
 use Symfony\Component\Routing\Annotation\Route;
-use Symfony\Flex\Response;
+use Throwable;
 
 class UserApiController extends AbstractController
 {
     /**
-     * @Route("/api/user/create", name="app_api_user_create", methods="GET")
+     * @Route("/api/v1/user/create", name="app_api_user_create", methods="POST")
+     * @param ManagerRegistry $doctrine
+     * @param Request $request
+     * @param ValidatorInterface $validator
+     * @param UserPasswordHasherInterface $passwordHasher
+     * @param RateLimiterFactory $anonymousApiLimiter
+     * @param TranslatorInterface $translator
+     * @return JsonResponse
      */
-    public function userCreate(ManagerRegistry $doctrine): JsonResponse
+    public function userCreate(
+        ManagerRegistry $doctrine, 
+        Request $request, 
+        ValidatorInterface $validator,
+        UserPasswordHasherInterface $passwordHasher,
+        RateLimiterFactory $anonymousApiLimiter,
+        TranslatorInterface $translator
+    ): JsonResponse
     {
-        $entityManager = $doctrine->getManager();
-
-        $user = new User();
-
-        if (isset($_GET['firstName']) && !empty($_GET['firstName'])) {
-            $user->setFirstName($_GET['firstName']);
-        } else {
-            return $this->json(['error' => 'Param \'firstName\' is empty'], 500);
-        }
-
-        if (isset($_GET['lastName']) && !empty($_GET['lastName'])) {
-            $user->setLastName($_GET['lastName']);
-        } else {
-            return $this->json(['error' => 'Param \'lastName\' is empty'], 500);
-        }
-
-        if (isset($_GET['middleName'])) {
-            $user->setMiddleName($_GET['middleName']);
-        }
-
-        $entityManager->persist($user);
-
         try {
-            $entityManager->flush();
+            $limiter = $anonymousApiLimiter->create($request->getClientIp());
 
-            return $this->json(['message' => 'New user created!']);
-        } catch (\Throwable $ex) {
-            return $this->json(['error' => $ex->getMessage()], 500);
+            if (false === $limiter->consume(1)->isAccepted()) {
+                throw new TooManyRequestsHttpException(null, 'Many requests');
+            }
+
+            $entityManager = $doctrine->getManager();
+
+            $user = new User();
+
+            $user->setFirstName($request->get("firstName"));
+            $user->setLastName($request->get("lastName"));
+            $user->setMiddleName($request->get("middleName"));
+            $user->setEmail($request->get("email"));
+
+            $plaintextPassword = $request->get("password");
+            $hashedPassword = $passwordHasher->hashPassword($user, $plaintextPassword);
+            
+            $user->setPassword($hashedPassword);
+
+            $errors = $validator->validate($user);
+
+            if (!$errors->count() > 0) {
+                $entityManager->persist($user);
+                $entityManager->flush();
+                
+                return $this->json(['message' => $translator->trans('New user created')]);
+            } else {
+                return $this->json(['error' => (string) $errors], 500);
+            }
+        } catch (Throwable $e) {
+            return $this->json(['error' => $e->getMessage()], 500);
         }
     }
 
     /**
-     * @Route("/api/user/edit/{id}", name="app_api_user_edit", methods="GET")
+     * @Route("/api/v1/user/edit/{id}", name="app_api_user_edit", methods="PUT")
+     * @param ManagerRegistry $doctrine
+     * @param UserRepository $userRepository
+     * @param Request $request
+     * @param ValidatorInterface $validator
+     * @param int $id
+     * @return JsonResponse
      */
-    public function userEdit(ManagerRegistry $doctrine, int $id): JsonResponse
+    public function userEdit(
+        ManagerRegistry $doctrine, 
+        UserRepository $userRepository, 
+        Request $request, 
+        ValidatorInterface $validator,
+        TranslatorInterface $translator,
+        int $id
+    ): JsonResponse
     {
-        $entityManager = $doctrine->getManager();
-        $user = $entityManager->getRepository(User::class)->find($id);
-
-        if (isset($_GET['firstName']) && !empty($_GET['firstName'])) {
-            $user->setFirstName($_GET['firstName']);
-        }
-        if (isset($_GET['lastName']) && !empty($_GET['lastName'])) {
-            $user->setLastName($_GET['lastName']);
-        }
-        if (isset($_GET['middleName'])) {
-            $user->setMiddleName($_GET['middleName']);
-        }
-
-        $entityManager->persist($user);
-
         try {
-            $entityManager->flush();
+            $entityManager = $doctrine->getManager();
+            $user = $userRepository->find($id);
+            
+            $firstName = $request->get("firstName");
+            $lastName = $request->get("lastName");
+            $middleName = $request->get("middleName");
 
-            return $this->json(['message' => 'User '.$id.' edit!']);
-        } catch (\Throwable $ex) {
-            return $this->json(['error' => $ex->getMessage()], 500);
+            if (isset($firstName) && !empty($firstName)) {
+                $user->setFirstName($firstName);
+            }
+
+            if (isset($lastName) && !empty($lastName)) {
+                $user->setLastName($lastName);
+            }
+
+            if (empty($middleName)) {
+                $user->setMiddleName(null);
+            } else {
+                $user->setMiddleName($middleName);
+            }
+
+            $errors = $validator->validate($user);
+
+            if (!$errors->count() > 0) {        
+                $entityManager->persist($user);
+                $entityManager->flush();
+                return $this->json(['message' => $translator->trans('User edit', ['{id}' => $id])]);
+            } else {
+                return $this->json(['error' => (string) $errors], 500);
+            }
+        } catch (Throwable $e) {
+            return $this->json(['error' => $e->getMessage()], 500);
         }
     }
 
     /**
-     * @Route("/api/user/delete/{id}", name="app_api_user_delete", methods="DELETE")
+     * @Route("/api/v1/user/delete/{id}", name="app_api_user_delete", methods="DELETE")
+     * @param ManagerRegistry $doctrine
+     * @param UserRepository $userRepository
+     * @param int $id
+     * @return JsonResponse
      */
-    public function userDelete(ManagerRegistry $doctrine, int $id): JsonResponse
+    public function userDelete(
+        ManagerRegistry $doctrine, 
+        UserRepository $userRepository,
+        TranslatorInterface $translator,
+        int $id
+    ): JsonResponse
     {
-        $entityManager = $doctrine->getManager();
-        $user = $entityManager->getRepository(User::class)->find($id);
-
-        $entityManager->remove($user);
-
         try {
+            $entityManager = $doctrine->getManager();
+
+            $user = $userRepository->find($id);
+
+            $entityManager->remove($user);
             $entityManager->flush();
 
-            return $this->json(['message' => 'User '.$id.' delete!']);
-        } catch (\Throwable $ex) {
-            return $this->json(['error' => $ex->getMessage()], 500);
+            return $this->json(['message' => $translator->trans('User delete', ['{id}' => $id])]);
+        } catch (Throwable $e) {
+            return $this->json(['error' => $e->getMessage()], 500);
         }
     }
 }
